@@ -1,0 +1,82 @@
+#ifndef __VMRP_UTILS_H__
+#define __VMRP_UTILS_H__
+
+#include <ctype.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "types.h"
+
+#include <unicorn/unicorn.h>
+
+#ifndef EM_PORT_API
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#define EM_PORT_API(rettype) rettype EMSCRIPTEN_KEEPALIVE
+#include "../wasm/unicorn/unicorn.h"
+#else
+#define EM_PORT_API(rettype) rettype
+#endif
+#endif
+
+
+#ifndef NULL
+#include <stddef.h>
+#endif
+
+#include "rbtree.h"
+
+#ifndef offsetof
+#define offsetof(type, field) ((size_t) & ((type *)0)->field)
+#endif
+#ifndef countof
+#define countof(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
+#ifdef __x86_64__
+#define PRId "I64d"
+#define PRIX "I64X"
+#elif __i386__
+#define PRId "d"
+#define PRIX "X"
+#elif defined(__aarch64__) || defined(__arm__)
+#define PRId PRId64
+#define PRIX PRIx64
+#endif
+
+// 字节对齐
+#define ALIGN(x, align) (((x) + ((align)-1)) & ~((align)-1))
+
+#define MAKERGB565(r, g, b) (uint16_t)(((uint32_t)(r >> 3) << 11) | ((uint32_t)(g >> 2) << 5) | ((uint32_t)(b >> 3)))
+#define PIXEL565R(v) ((((uint32_t)v >> 11) << 3) & 0xff)
+#define PIXEL565G(v) ((((uint32_t)v >> 5) << 2) & 0xff)
+#define PIXEL565B(v) (((uint32_t)v << 3) & 0xff)
+
+int wstrlen(char* txt);
+void cpsrToStr(uint32_t v, char *out);
+char *memTypeStr(uc_mem_type type);
+void dumpREG(uc_engine *uc);
+void dumpMemStr(void *ptr, size_t len);
+char *getSplitStr(char *str, char split, int n);
+
+typedef struct uIntMap {
+    struct rb_node node;
+    uint32_t key;
+    void *data;
+} uIntMap;
+
+uIntMap *uIntMap_search(struct rb_root *root, uint32_t key);
+int uIntMap_insert(struct rb_root *root, uIntMap *obj);
+uIntMap *uIntMap_delete(struct rb_root *root, uint32_t key);
+
+uint32_t copyWstrToMrp(char *str);
+uint32_t copyStrToMrp(char *str);
+void printScreen(char *filename, uint16_t *buf);
+
+int64_t get_uptime_ms(void);
+int64_t get_time_ms(void);
+int32_t getDatetime(mr_datetime *datetime);
+
+#endif

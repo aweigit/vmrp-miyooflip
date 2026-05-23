@@ -1,0 +1,22 @@
+CC := aarch64-none-linux-gnu-gcc
+CFLAGS := -O3 -Wall -DNETWORK_SUPPORT -DVMRP -mcpu=cortex-a55 -mtune=cortex-a55 -flto -fno-plt -fomit-frame-pointer -I./header
+LDFLAGS := -lpthread -lm -flto -Wl,--as-needed -Wl,-O1 -Wl,--gc-sections
+OBJS := network.o fileLib.o vmrp.o utils.o rbtree.o bridge.o memory.o cJSON.o
+
+LDFLAGS += -L/mnt/d/baiduyun/home/lib-trimui -Wl,-rpath-link=/mnt/d/baiduyun/home/lib-trimui -lSDL2 -lSDL2_mixer -L./aarch64_lib -lunicorn
+
+ifeq ($(DEBUG),1)
+	CFLAGS += -DDEBUG
+	OBJS += debug.o trace.o
+	LDFLAGS += -lcapstone
+endif
+
+main_aarch64: $(OBJS) main.o
+	$(CC) $(CFLAGS) -o ./bin/$@ $^ $(LDFLAGS)
+
+%.o:%.c
+	$(CC) $(CFLAGS) -c $^
+
+.PHONY: clean
+clean:
+	-rm -f *.o
