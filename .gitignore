@@ -1,8 +1,6 @@
 *.o
 *.ext
 .vscode/
-lib/
-aarch64_lib/
 bin/
 
 
