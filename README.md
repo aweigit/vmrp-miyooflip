@@ -1,6 +1,6 @@
-# vmrp-miyooflip - Mythroad/Sky mrp游戏模拟器
+# vmrp-miyooflip - Mythroad/冒泡 mrp游戏模拟器
 
-基于 [vmrp](https://github.com/vmrp/vmrp) 的 Mythroad（斯凯/Sky）平台模拟器，用于在开源掌机上运行早期国产功能手机的 MRP 游戏。
+基于 [vmrp](https://github.com/vmrp/vmrp) 的 Mythroad（冒泡）平台模拟器，用于在开源掌机上运行早期国产功能手机的 MRP 游戏。已测试miyooflip、trimuibrick、miyoomini
 
 
 ## 依赖
@@ -9,7 +9,8 @@
 |------|------|
 | SDL2 | 窗口、渲染、输入 |
 | SDL2_mixer | 音频播放 |
-| Unicorn Engine v1 | ARM CPU 模拟 |
+| dynarmic | ARM CPU 模拟（首选） |
+| Unicorn Engine v1 | ARM CPU 模拟（备选） |
 | Capstone | ARM 反汇编（仅 DEBUG 构建需要） |
 
 **Unicorn Engine** 需要手动编译或使用预编译库（`lib/` 和 `aarch64_lib/` 目录已提供）。
@@ -20,10 +21,10 @@
 
 ```bash
 # Release 构建
-make
+make dynarmic
 
 # Debug 构建（带 ARM 调试器支持）
-make DEBUG=1
+make dynarmic DEBUG=1
 ```
 
 产物生成在 `./bin/main`。
@@ -31,10 +32,18 @@ make DEBUG=1
 ### ARM64 交叉编译
 
 ```bash
-make -f Makefile.aarch64
+make -f Makefile.aarch64 dynarmic
 ```
 
 产物生成在 `./bin/main_aarch64`。
+
+### ARM32 交叉编译
+
+```bash
+make -f Makefile.arm32 arm32 -j4
+```
+
+产物生成在 `./bin/main_arm32`。
 
 ### 构建参数
 
@@ -49,10 +58,11 @@ make -f Makefile.aarch64
 
 ```bash
 cd bin
-./main <窗口宽> <窗口高> [mrp文件] [入口文件] [入口函数]
+VMRP_CPU_BACKEND=dynarmic ./main <窗口宽> <窗口高> [mrp文件] [入口文件] [入口函数]
 ```
 
 **参数说明：**
+- `VMRP_CPU_BACKEND`: dynarmic（默认首选）、unicorn、native（arm32机器只能选择这个）
 - `width` / `height`：窗口尺寸（必填）
 - `mrp文件`：要启动的 .mrp 文件（默认 `dsm_gm.mrp`）
 - `入口文件`：MRP 中的入口 Lua 脚本（默认 `start.mr`）
@@ -60,12 +70,14 @@ cd bin
 
 **示例：**
 ```bash
-# 启动默认游戏（mythroad文件夹下的dsm_gm.mrp，注意dsm_gm.mrp虽然在mythroad文件夹下，但是启动参数里mrp文件路径不要带上mythroad）
-./main 640 480
+# x64 启动默认游戏（mythroad文件夹下的dsm_gm.mrp，注意dsm_gm.mrp虽然在mythroad文件夹下，但是启动参数里mrp文件路径不要带上mythroad）
+VMRP_CPU_BACKEND=dynarmic ./main 640 480
 
-# 启动指定 MRP 游戏（启动mythroad文件夹下的app240320/abc.mrp）
-./main 640 480 app240320/abc.mrp
+# trimui brick 启动指定 MRP 游戏（启动mythroad文件夹下的app240320/abc.mrp）
+VMRP_CPU_BACKEND=dynarmic ./main_aarch64 1024 768 app240320/abc.mrp
 
+# miyoo mini
+VMRP_CPU_BACKEND=native ./main_arm32 640 480 app240320/app.mrp
 ```
 
 ## 按键映射

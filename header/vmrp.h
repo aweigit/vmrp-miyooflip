@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "utils.h"
+#include "arm_runtime.h"
 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
@@ -38,5 +39,7 @@ static inline uint32_t toMrpMemAddr(void *ptr) {
 int32_t event(int32_t code, int32_t p1, int32_t p2);
 int32_t timer();
 int startVmrp(const char *mrpFile, const char *extName, const char *entry);
+ArmRuntime *initVmrp(void);
+int freeVmrp(void);
 
 #endif

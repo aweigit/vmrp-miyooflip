@@ -55,6 +55,10 @@ void cpsrToStr(uint32_t v, char *out) {
 }
 
 void dumpREG(uc_engine *uc) {
+#ifdef VMRP_ENABLE_NATIVE_ARM
+    (void)uc;
+    printf("dumpREG is unavailable in the native ARM build\n");
+#else
     uint32_t v, cpsr;
 
     uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
@@ -81,6 +85,7 @@ void dumpREG(uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_PC, &v); printf(" PC=0x%08X\tV:%d\n", v, (cpsr&(1<<28))>>28);
     printf("==============================================================\n");
     // clang-format on
+#endif
 }
 
 void dumpMemStr(void *ptr, size_t len) {

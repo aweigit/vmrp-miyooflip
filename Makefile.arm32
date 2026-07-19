@@ -1,0 +1,41 @@
+CROSS_COMPILE ?= arm-linux-gnueabihf-
+CC := $(CROSS_COMPILE)gcc
+DEBUG ?= 0
+BUILD_DIR := build/arm32/$(if $(filter 1,$(DEBUG)),debug,release)
+BIN_DIR := bin
+TARGET := $(BIN_DIR)/main_arm32
+
+CFLAGS := -O3 -Wall -Wextra -DNETWORK_SUPPORT -DVMRP -DVMRP_ENABLE_NATIVE_ARM \
+	 -mcpu=cortex-a7 -mtune=cortex-a7  -mfloat-abi=hard -mfpu=neon-vfpv4 -marm -fno-omit-frame-pointer -fno-pie -I./header
+LDFLAGS := -no-pie -Wl,-Ttext-segment=0x01000000 -lpthread -lm \
+	-Wl,--as-needed -Wl,-O1 -Wl,--gc-sections
+SOURCES := network.c fileLib.c vmrp.c utils.c rbtree.c bridge.c memory.c cJSON.c \
+	guest_memory.c arm_runtime.c backend_native_arm.c main_miyoomini.c
+OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SOURCES)) $(BUILD_DIR)/backend_native_arm_asm.o
+
+LDFLAGS += -lSDL2 -lSDL2_mixer
+
+ifeq ($(DEBUG),1)
+CFLAGS += -DDEBUG
+endif
+
+.PHONY: arm32 native clean
+arm32 native: $(TARGET)
+	@:
+
+$(TARGET): $(OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/backend_native_arm_asm.o: backend_native_arm.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BIN_DIR):
+	mkdir -p $@
+
+clean:
+	-rm -rf build/arm32

@@ -36,10 +36,10 @@
         uc_reg_write(uc, UC_ARM_REG_R0, &_v); \
     }
 typedef struct mr_c_function_P_t {
-    uint8 *start_of_ER_RW;  // RW段指针
+    GuestAddr start_of_ER_RW;  // Guest RW段地址
     uint32 ER_RW_Length;    // RW长度
     int32 ext_type;         // ext启动类型，为1时表示ext启动
-    void *mrc_extChunk;     // ext模块描述段，下面的结构体。
+    GuestAddr mrc_extChunk; // Guest ext模块描述段地址
     int32 stack;            // stack shell 2008-2-28
 } mr_c_function_P_t;
 
@@ -54,8 +54,90 @@ static uint32_t mr_extHelper_addr;
 static const char SPIN_LOCK_FAIL[] = "spin lock fail";
 static const char SPIN_UNLOCK_FAIL[] = "spin unlock fail";
 static pthread_spinlock_t spinlock;
+static ArmRuntime *bridgeRuntime;
 
-static void runCode(uc_engine *uc, uint32_t startAddr, uint32_t stopAddr, bool isThumb);
+static void runCode(ArmRuntime *runtime, uint32_t startAddr, uint32_t stopAddr, bool isThumb);
+
+/*
+ * Transitional source compatibility for the bridge implementations below.
+ * Their callback ABI is ArmRuntime-based even though the local variable keeps
+ * the historical `uc` name. These adapters are backend-independent.
+ */
+static int bridge_reg_read(ArmRuntime *runtime, int reg, void *value) {
+    ArmRegister runtime_reg;
+    switch (reg) {
+        case UC_ARM_REG_R0: runtime_reg = ARM_RUNTIME_R0; break;
+        case UC_ARM_REG_R1: runtime_reg = ARM_RUNTIME_R1; break;
+        case UC_ARM_REG_R2: runtime_reg = ARM_RUNTIME_R2; break;
+        case UC_ARM_REG_R3: runtime_reg = ARM_RUNTIME_R3; break;
+        case UC_ARM_REG_R4: runtime_reg = ARM_RUNTIME_R4; break;
+        case UC_ARM_REG_R5: runtime_reg = ARM_RUNTIME_R5; break;
+        case UC_ARM_REG_R6: runtime_reg = ARM_RUNTIME_R6; break;
+        case UC_ARM_REG_R7: runtime_reg = ARM_RUNTIME_R7; break;
+        case UC_ARM_REG_R8: runtime_reg = ARM_RUNTIME_R8; break;
+        case UC_ARM_REG_R9: runtime_reg = ARM_RUNTIME_R9; break;
+        case UC_ARM_REG_R10: runtime_reg = ARM_RUNTIME_R10; break;
+        case UC_ARM_REG_R11: runtime_reg = ARM_RUNTIME_R11; break;
+        case UC_ARM_REG_R12: runtime_reg = ARM_RUNTIME_R12; break;
+        case UC_ARM_REG_SP: runtime_reg = ARM_RUNTIME_SP; break;
+        case UC_ARM_REG_LR: runtime_reg = ARM_RUNTIME_LR; break;
+        case UC_ARM_REG_PC: runtime_reg = ARM_RUNTIME_PC; break;
+        case UC_ARM_REG_CPSR: runtime_reg = ARM_RUNTIME_CPSR; break;
+        case UC_ARM_REG_FPSCR: runtime_reg = ARM_RUNTIME_FPSCR; break;
+        default: return -1;
+    }
+    return arm_runtime_reg_read(runtime, runtime_reg, value) ? 0 : -1;
+}
+
+static int bridge_reg_write(ArmRuntime *runtime, int reg, const void *value) {
+    uint32_t data;
+    memcpy(&data, value, sizeof(data));
+    ArmRegister runtime_reg;
+    switch (reg) {
+        case UC_ARM_REG_R0: runtime_reg = ARM_RUNTIME_R0; break;
+        case UC_ARM_REG_R1: runtime_reg = ARM_RUNTIME_R1; break;
+        case UC_ARM_REG_R2: runtime_reg = ARM_RUNTIME_R2; break;
+        case UC_ARM_REG_R3: runtime_reg = ARM_RUNTIME_R3; break;
+        case UC_ARM_REG_R4: runtime_reg = ARM_RUNTIME_R4; break;
+        case UC_ARM_REG_R5: runtime_reg = ARM_RUNTIME_R5; break;
+        case UC_ARM_REG_R6: runtime_reg = ARM_RUNTIME_R6; break;
+        case UC_ARM_REG_R7: runtime_reg = ARM_RUNTIME_R7; break;
+        case UC_ARM_REG_R8: runtime_reg = ARM_RUNTIME_R8; break;
+        case UC_ARM_REG_R9: runtime_reg = ARM_RUNTIME_R9; break;
+        case UC_ARM_REG_R10: runtime_reg = ARM_RUNTIME_R10; break;
+        case UC_ARM_REG_R11: runtime_reg = ARM_RUNTIME_R11; break;
+        case UC_ARM_REG_R12: runtime_reg = ARM_RUNTIME_R12; break;
+        case UC_ARM_REG_SP: runtime_reg = ARM_RUNTIME_SP; break;
+        case UC_ARM_REG_LR: runtime_reg = ARM_RUNTIME_LR; break;
+        case UC_ARM_REG_PC: runtime_reg = ARM_RUNTIME_PC; break;
+        case UC_ARM_REG_CPSR: runtime_reg = ARM_RUNTIME_CPSR; break;
+        case UC_ARM_REG_FPSCR: runtime_reg = ARM_RUNTIME_FPSCR; break;
+        default: return -1;
+    }
+    return arm_runtime_reg_write(runtime, runtime_reg, data) ? 0 : -1;
+}
+
+static int bridge_mem_read(ArmRuntime *runtime, uint64_t address, void *data, size_t size) {
+    if (address > UINT32_MAX) return -1;
+    return arm_runtime_mem_read(runtime, (GuestAddr)address, data, size) ? 0 : -1;
+}
+
+static int bridge_mem_write(ArmRuntime *runtime, uint64_t address, const void *data, size_t size) {
+    if (address > UINT32_MAX) return -1;
+    return arm_runtime_mem_write(runtime, (GuestAddr)address, data, size) ? 0 : -1;
+}
+
+#define uc_engine ArmRuntime
+#define uc_reg_read bridge_reg_read
+#define uc_reg_write bridge_reg_write
+#define uc_mem_read bridge_mem_read
+#define uc_mem_write bridge_mem_write
+
+static void notify_guest_write(ArmRuntime *runtime, uint32_t address, size_t size) {
+    if (size != 0) {
+        arm_runtime_mem_write(runtime, address, getMrpMemPtr(address), size);
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -65,6 +147,7 @@ static void br__mr_c_function_new(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &p_f);
     uc_reg_read(uc, UC_ARM_REG_R1, &p_len);
     mr_extHelper_addr = p_f;
+    printf("-----> mr_extHelper:0x%X len:%u\n", mr_extHelper_addr, p_len);
     if (mr_c_function_P) {
         my_freeExt(mr_c_function_P);
     }
@@ -106,7 +189,11 @@ static void br_memcpy(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &dst);
     uc_reg_read(uc, UC_ARM_REG_R1, &src);
     uc_reg_read(uc, UC_ARM_REG_R2, &n);
-    SET_RET_V(toMrpMemAddr(memcpy(getMrpMemPtr(dst), getMrpMemPtr(src), n)));
+    if (uc_mem_write(uc, dst, getMrpMemPtr(src), n) != 0) {
+        SET_RET_V(0);
+        return;
+    }
+    SET_RET_V(dst);
 }
 
 static void br_memset(BridgeMap *o, uc_engine *uc) {
@@ -115,7 +202,15 @@ static void br_memset(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &dst);
     uc_reg_read(uc, UC_ARM_REG_R1, &value);
     uc_reg_read(uc, UC_ARM_REG_R2, &n);
-    SET_RET_V(toMrpMemAddr(memset(getMrpMemPtr(dst), value, n)));
+    void *target = memset(getMrpMemPtr(dst), value, n);
+    /* Notify the active backend after the direct host write. Dynarmic uses
+     * this to invalidate only executable pages; Unicorn simply mirrors the
+     * already-written bytes. */
+    if (uc_mem_write(uc, dst, target, n) != 0) {
+        SET_RET_V(0);
+        return;
+    }
+    SET_RET_V(dst);
 }
 
 // 获取参数的工具方法，第一个参数n=0
@@ -192,6 +287,7 @@ static void br_mr_read(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R2, &l);
     char *buf = getMrpMemPtr(p);
     ret = my_read(f, buf, l);
+    if ((int32_t)ret > 0) notify_guest_write(uc, p, ret);
     LOG("ext call %s(%d, 0x%X, %u): %d\n", o->name, f, p, l, ret);
     SET_RET_V(ret);
 }
@@ -383,6 +479,7 @@ static void br_readdir(BridgeMap *o, uc_engine *uc) {
     char *r = my_readdir(f);
     if (r != NULL) {
         strncpy(readdirSharedMem, r, READDIR_SHARED_MEM_SIZE - 1);
+        notify_guest_write(uc, toMrpMemAddr(readdirSharedMem), READDIR_SHARED_MEM_SIZE);
         SET_RET_V(toMrpMemAddr(readdirSharedMem));
     } else {
         SET_RET_V((uint32_t)NULL);
@@ -402,7 +499,9 @@ static void br_getDatetime(BridgeMap *o, uc_engine *uc) {
     LOG("ext call %s()\n", o->name);
     uint32_t datetime;
     uc_reg_read(uc, UC_ARM_REG_R0, &datetime);
-    SET_RET_V(getDatetime(getMrpMemPtr(datetime)));
+    int32_t ret = getDatetime(getMrpMemPtr(datetime));
+    notify_guest_write(uc, datetime, sizeof(mr_datetime));
+    SET_RET_V(ret);
 }
 
 static void br_mr_initNetwork(BridgeMap *o, uc_engine *uc) {
@@ -412,7 +511,7 @@ static void br_mr_initNetwork(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &cb);
     uc_reg_read(uc, UC_ARM_REG_R1, &mode);
     uc_reg_read(uc, UC_ARM_REG_R2, &userData);
-    SET_RET_V(my_initNetwork(uc, (void *)cb, getMrpMemPtr(mode), (void *)userData));
+    SET_RET_V(my_initNetwork(bridgeRuntime, (void *)(uintptr_t)cb, getMrpMemPtr(mode), (void *)(uintptr_t)userData));
 }
 
 static void br_mr_socket(BridgeMap *o, uc_engine *uc) {
@@ -457,7 +556,7 @@ static void br_mr_getHostByName(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &name);
     uc_reg_read(uc, UC_ARM_REG_R1, &cb);
     uc_reg_read(uc, UC_ARM_REG_R2, &userData);
-    SET_RET_V(my_getHostByName(uc, getMrpMemPtr(name), (void *)cb, (void *)userData));
+    SET_RET_V(my_getHostByName(bridgeRuntime, getMrpMemPtr(name), (void *)(uintptr_t)cb, (void *)(uintptr_t)userData));
 }
 
 static void br_mr_sendto(BridgeMap *o, uc_engine *uc) {
@@ -491,7 +590,11 @@ static void br_mr_recvfrom(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R2, &len);
     uc_reg_read(uc, UC_ARM_REG_R3, &ip);
     port = getArg(uc, 4);
-    SET_RET_V(my_recvfrom(s, getMrpMemPtr(buf), len, getMrpMemPtr(ip), (uint16_t *)getMrpMemPtr(port)));
+    int32_t ret = my_recvfrom(s, getMrpMemPtr(buf), len, getMrpMemPtr(ip), (uint16_t *)getMrpMemPtr(port));
+    if (ret > 0) notify_guest_write(uc, buf, ret);
+    notify_guest_write(uc, ip, sizeof(uint32_t));
+    notify_guest_write(uc, port, sizeof(uint16_t));
+    SET_RET_V(ret);
 }
 
 static void br_mr_recv(BridgeMap *o, uc_engine *uc) {
@@ -501,7 +604,9 @@ static void br_mr_recv(BridgeMap *o, uc_engine *uc) {
     uc_reg_read(uc, UC_ARM_REG_R0, &s);
     uc_reg_read(uc, UC_ARM_REG_R1, &buf);
     uc_reg_read(uc, UC_ARM_REG_R2, &len);
-    SET_RET_V(my_recv(s, getMrpMemPtr(buf), len));
+    int32_t ret = my_recv(s, getMrpMemPtr(buf), len);
+    if (ret > 0) notify_guest_write(uc, buf, ret);
+    SET_RET_V(ret);
 }
 
 /*
@@ -1228,37 +1333,50 @@ static int bridge_insert(uint32_t address, BridgeMap *value) {
     }
 }
 
-static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
-    BridgeMap *obj = bridge_lookup((uint32_t)address);
-    if (obj) {
-        if (obj->type == MAP_FUNC) {
-            if (obj->fn == NULL) {
-                printf("!!! %s() Not yet implemented function !!! \n", obj->name);
-                exit(1);
-                return;
-            }
-            obj->fn(obj, uc);
+#undef uc_mem_write
+#undef uc_mem_read
+#undef uc_reg_write
+#undef uc_reg_read
+#undef uc_engine
 
-            uint32_t _lr;
-            uc_reg_read(uc, UC_ARM_REG_LR, &_lr);
-            uc_reg_write(uc, UC_ARM_REG_PC, &_lr);
-            return;
-        }
-        printf("!!! unregister function at 0x%" PRIX64 " !!! \n", address);
+bool bridge_dispatch(ArmRuntime *runtime, uint32_t address) {
+    BridgeMap *obj = bridge_lookup(address);
+    if (!obj) return false;
+    if (obj->type != MAP_FUNC) {
+        printf("!!! unregister function at 0x%X !!! \n", address);
+        return false;
     }
+    if (!obj->fn) {
+        printf("!!! %s() Not yet implemented function !!! \n", obj->name);
+        exit(1);
+    }
+
+    obj->fn(obj, runtime);
+
+    uint32_t lr;
+    if (!arm_runtime_reg_read(runtime, ARM_RUNTIME_LR, &lr) ||
+        !arm_runtime_reg_write(runtime, ARM_RUNTIME_PC, lr)) {
+        fprintf(stderr, "Failed to return from bridge %s at 0x%X\n", obj->name, address);
+        return false;
+    }
+    return true;
 }
 
-static void *hooks_init(uc_engine *uc, BridgeMap *map, uint32_t mapCount, uint32_t size) {
-    uc_err err;
-    uc_hook trace;
+static bool hook_code(ArmRuntime *runtime, GuestAddr address, uint32_t size, void *user_data) {
+    (void)size;
+    (void)user_data;
+    return bridge_dispatch(runtime, address);
+}
+
+static void *hooks_init(ArmRuntime *runtime, BridgeMap *map, uint32_t mapCount, uint32_t size) {
     BridgeMap *obj;
     uint32_t addr;
     void *ptr = my_mallocExt(size);
     uint32_t startAddress = toMrpMemAddr(ptr);
 
-    err = uc_hook_add(uc, &trace, UC_HOOK_CODE, hook_code, NULL, startAddress, startAddress + size, 0);
-    if (err != UC_ERR_OK) {
-        printf("add hook err %u (%s)\n", err, uc_strerror(err));
+    if (!arm_runtime_add_code_hook(runtime, startAddress, startAddress + size, hook_code, NULL)) {
+        fprintf(stderr, "Failed to add bridge code hook at 0x%X-0x%X\n",
+                startAddress, startAddress + size);
         goto end;
     }
 
@@ -1266,11 +1384,11 @@ static void *hooks_init(uc_engine *uc, BridgeMap *map, uint32_t mapCount, uint32
         obj = &map[i];
         addr = startAddress + obj->pos;
         if (obj->initFn != NULL) {
-            obj->initFn(obj, uc, addr);
+            obj->initFn(obj, runtime, addr);
         } else {
             if (obj->type == MAP_FUNC) {
                 // 默认的函数初始化，初始化为地址值，当PC寄存器执行到该地址时拦截下来进入我们的回调函数
-                uc_mem_write(uc, addr, &addr, 4);
+                arm_runtime_mem_write(runtime, addr, &addr, 4);
             }
         }
         if (bridge_insert(addr, obj) != 0) {
@@ -1285,32 +1403,50 @@ end:
     return NULL;
 }
 
-static void runCode(uc_engine *uc, uint32_t startAddr, uint32_t stopAddr, bool isThumb) {
-    uc_reg_write(uc, UC_ARM_REG_LR, &stopAddr);  // 当程序执行到这里时停止运行(return)
-
-    // Note we start at ADDRESS | 1 to indicate THUMB mode.
-    startAddr = isThumb ? (startAddr | 1) : startAddr;
-    uc_err err = uc_emu_start(uc, startAddr, stopAddr, 0, 0);  // 似乎unicorn 1.0.2之前并不会在pc==stopAddr时立即停止
-    if (err) {
-        printf("Failed on uc_emu_start() with error returned: %u (%s)\n", err, uc_strerror(err));
+static void runCode(ArmRuntime *runtime, uint32_t startAddr, uint32_t stopAddr, bool isThumb) {
+    ArmRunOptions options = {
+        .start = startAddr,
+        .stop = stopAddr,
+        .thumb = isThumb,
+    };
+    ArmRunResult result = arm_runtime_run(runtime, &options);
+    if (result.reason != ARM_STOP_RETURN) {
+        printf("Failed to run ARM code: backend error %d (%s)\n",
+               result.backend_error, result.message ? result.message : "unknown error");
         printf("startAddr: 0x%X, stopAddr: 0x%X, isThumb: %d\n", startAddr, stopAddr, isThumb);
 #ifdef DEBUG
         dump_trace();
 #endif
-        dumpREG(uc);
+        uint32_t regs[16] = {0};
+        for (int i = 0; i < 13; ++i) {
+            arm_runtime_reg_read(runtime, (ArmRegister)(ARM_RUNTIME_R0 + i), &regs[i]);
+        }
+        arm_runtime_reg_read(runtime, ARM_RUNTIME_SP, &regs[13]);
+        arm_runtime_reg_read(runtime, ARM_RUNTIME_LR, &regs[14]);
+        arm_runtime_reg_read(runtime, ARM_RUNTIME_PC, &regs[15]);
+        fprintf(stdout,
+                "R0=%08X R1=%08X R2=%08X R3=%08X\n"
+                "R4=%08X R5=%08X R6=%08X R7=%08X\n"
+                "R8=%08X R9=%08X R10=%08X R11=%08X R12=%08X\n"
+                "SP=%08X LR=%08X PC=%08X fault=%08X\n",
+                regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7],
+                regs[8], regs[9], regs[10], regs[11], regs[12], regs[13], regs[14], regs[15],
+                result.fault_address);
+        fflush(stdout);
         exit(1);
     }
 }
 
-uc_err bridge_init(uc_engine *uc) {
+int bridge_init(ArmRuntime *runtime) {
+    bridgeRuntime = runtime;
     if (pthread_spin_init(&spinlock, PTHREAD_PROCESS_PRIVATE) != 0) {
         perror("spinlock init fail");
         exit(EXIT_FAILURE);
     }
     uint32_t len = 4 * countof(mr_table_funcMap);  // 因为都是指针，所以直接可以算出来总内存大小
-    mr_table = hooks_init(uc, mr_table_funcMap, countof(mr_table_funcMap), len);
+    mr_table = hooks_init(runtime, mr_table_funcMap, countof(mr_table_funcMap), len);
 
-    dsm_require_funcs = hooks_init(uc, dsm_require_funcs_funcMap, countof(dsm_require_funcs_funcMap), sizeof(DSM_REQUIRE_FUNCS));
+    dsm_require_funcs = hooks_init(runtime, dsm_require_funcs_funcMap, countof(dsm_require_funcs_funcMap), sizeof(DSM_REQUIRE_FUNCS));
     *(int32 *)((uint8 *)dsm_require_funcs + 0xCC) = FLAG_USE_UTF8_FS;
 
     mr_c_event = my_mallocExt(sizeof(event_t));
@@ -1319,61 +1455,79 @@ uc_err bridge_init(uc_engine *uc) {
     return UC_ERR_OK;
 }
 
-uc_err bridge_ext_init(uc_engine *uc) {
+int bridge_ext_init(ArmRuntime *runtime) {
     uint32_t v = toMrpMemAddr(mr_table);
-    uc_mem_write(uc, CODE_ADDRESS, &v, 4);  // 设置mr_table
+    arm_runtime_mem_write(runtime, CODE_ADDRESS, &v, 4);  // 设置mr_table
 
     v = 1;  // 传参数1 使用mr_extHelper，因为mr_helper会有刷屏操作
-    uc_reg_write(uc, UC_ARM_REG_R0, &v);
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R0, v);
 
     // 执行ext内的mr_c_function_load()
-    runCode(uc, CODE_ADDRESS + 8, CODE_ADDRESS, false);
+    runCode(runtime, CODE_ADDRESS + 8, CODE_ADDRESS, false);
+
+    if (arm_runtime_backend(runtime) == ARM_BACKEND_DYNARMIC) {
+        uint32_t cpsr = 0;
+        arm_runtime_reg_read(runtime, ARM_RUNTIME_CPSR, &cpsr);
+        cpsr = (cpsr & 0x0FFFFFFFu) | (1u << 29);  // Match Unicorn: C=1, N=Z=V=0.
+        arm_runtime_reg_write(runtime, ARM_RUNTIME_CPSR, cpsr);
+    }
+
+    const char *snapshot_path = getenv("VMRP_EXT_SNAPSHOT");
+    if (snapshot_path) {
+        FILE *snapshot = fopen(snapshot_path, "wb");
+        if (snapshot) {
+            fwrite(mrpMemPtr, 1, TOTAL_MEMORY, snapshot);
+            fclose(snapshot);
+        } else {
+            perror("VMRP_EXT_SNAPSHOT");
+        }
+    }
 
     // mr_c_function.start_of_ER_RW 会被写入r9(SB)，指向的内存是用来存放全局变量的
-    printf("-----> r9:@%p\n", mr_c_function_P->start_of_ER_RW);
+    printf("-----> r9:0x%X\n", mr_c_function_P->start_of_ER_RW);
     return UC_ERR_OK;
 }
 
-static int32_t bridge_mr_extHelper(uc_engine *uc, uint32_t code, uint32_t input, uint32_t input_len) {
+static int32_t bridge_mr_extHelper(ArmRuntime *runtime, uint32_t code, uint32_t input, uint32_t input_len) {
     // int32 (*mr_extHelper)(void* P, int32 code, uint8* input, int32 input_len);
     uint32_t v = toMrpMemAddr(mr_c_function_P);
-    uc_reg_write(uc, UC_ARM_REG_R0, &v);          // p
-    uc_reg_write(uc, UC_ARM_REG_R1, &code);       // code
-    uc_reg_write(uc, UC_ARM_REG_R2, &input);      // input
-    uc_reg_write(uc, UC_ARM_REG_R3, &input_len);  // input_len
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R0, v);          // p
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R1, code);       // code
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R2, input);      // input
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R3, input_len);  // input_len
 
-    runCode(uc, mr_extHelper_addr, CODE_ADDRESS, false);
-    uc_reg_read(uc, UC_ARM_REG_R0, &v);
+    runCode(runtime, mr_extHelper_addr, CODE_ADDRESS, false);
+    arm_runtime_reg_read(runtime, ARM_RUNTIME_R0, &v);
     return v;
 }
 
-static inline int32_t bridge_mr_event(uc_engine *uc, int32_t code, int32_t param0, int32_t param1) {
+static inline int32_t bridge_mr_event(ArmRuntime *runtime, int32_t code, int32_t param0, int32_t param1) {
     mr_c_event->code = code;
     mr_c_event->p0 = param0;
     mr_c_event->p1 = param1;
-    return bridge_mr_extHelper(uc, 1, toMrpMemAddr(mr_c_event), sizeof(event_t));
+    return bridge_mr_extHelper(runtime, 1, toMrpMemAddr(mr_c_event), sizeof(event_t));
 }
 
 // 执行网络通信的回调
-int32_t bridge_dsm_network_cb(uc_engine *uc, uint32_t addr, int32_t p0, uint32_t p1) {
+int32_t bridge_dsm_network_cb(ArmRuntime *runtime, uint32_t addr, int32_t p0, uint32_t p1) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
     }
     uint32_t ret, r9;
-    uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+    arm_runtime_reg_read(runtime, ARM_RUNTIME_R9, &r9);
 
     // 因为回调不是从mr_extHelper调用，因此需要手动设置r9
-    uc_reg_write(uc, UC_ARM_REG_R9, &mr_c_function_P->start_of_ER_RW);
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R9, mr_c_function_P->start_of_ER_RW);
     // 实际上这个r9值被设置成mythroad层的，因为mythroad层的lua部分也会调用
     // 因此由mythroad层去区分是mythroad层的回调函数还是mrp层的回调函数，这就是userData存在的意义
 
-    uc_reg_write(uc, UC_ARM_REG_R0, &p0);
-    uc_reg_write(uc, UC_ARM_REG_R1, &p1);
-    runCode(uc, addr, CODE_ADDRESS, false);
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R0, (uint32_t)p0);
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R1, p1);
+    runCode(runtime, addr, CODE_ADDRESS, false);
 
-    uc_reg_write(uc, UC_ARM_REG_R9, &r9);  // 恢复r9
-    uc_reg_read(uc, UC_ARM_REG_R0, &ret);
+    arm_runtime_reg_write(runtime, ARM_RUNTIME_R9, r9);  // 恢复r9
+    arm_runtime_reg_read(runtime, ARM_RUNTIME_R0, &ret);
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1381,7 +1535,7 @@ int32_t bridge_dsm_network_cb(uc_engine *uc, uint32_t addr, int32_t p0, uint32_t
     return ret;
 }
 
-int32_t bridge_dsm_mr_start_dsm(uc_engine *uc, char *filename, char *ext, char *entry) {
+int32_t bridge_dsm_mr_start_dsm(ArmRuntime *runtime, char *filename, char *ext, char *entry) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1391,7 +1545,7 @@ int32_t bridge_dsm_mr_start_dsm(uc_engine *uc, char *filename, char *ext, char *
     mr_start_dsm_param->ext = copyStrToMrp(ext);
     mr_start_dsm_param->entry = entry ? copyStrToMrp(entry) : 0;
 
-    int32_t v = bridge_mr_event(uc, MR_START_DSM, toMrpMemAddr(mr_start_dsm_param), 0);
+    int32_t v = bridge_mr_event(runtime, MR_START_DSM, toMrpMemAddr(mr_start_dsm_param), 0);
 
     my_freeExt(getMrpMemPtr(mr_start_dsm_param->filename));
     mr_start_dsm_param->filename = 0;
@@ -1410,12 +1564,12 @@ int32_t bridge_dsm_mr_start_dsm(uc_engine *uc, char *filename, char *ext, char *
     return v;
 }
 
-int32_t bridge_dsm_mr_pauseApp(uc_engine *uc) {
+int32_t bridge_dsm_mr_pauseApp(ArmRuntime *runtime) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
     }
-    int32_t v = bridge_mr_event(uc, MR_PAUSEAPP, 0, 0);
+    int32_t v = bridge_mr_event(runtime, MR_PAUSEAPP, 0, 0);
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1423,12 +1577,12 @@ int32_t bridge_dsm_mr_pauseApp(uc_engine *uc) {
     return v;
 }
 
-int32_t bridge_dsm_mr_resumeApp(uc_engine *uc) {
+int32_t bridge_dsm_mr_resumeApp(ArmRuntime *runtime) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
     }
-    int32_t v = bridge_mr_event(uc, MR_RESUMEAPP, 0, 0);
+    int32_t v = bridge_mr_event(runtime, MR_RESUMEAPP, 0, 0);
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1436,12 +1590,12 @@ int32_t bridge_dsm_mr_resumeApp(uc_engine *uc) {
     return v;
 }
 
-int32_t bridge_dsm_mr_timer(uc_engine *uc) {
+int32_t bridge_dsm_mr_timer(ArmRuntime *runtime) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
     }
-    int32_t v = bridge_mr_event(uc, MR_TIMER, 0, 0);
+    int32_t v = bridge_mr_event(runtime, MR_TIMER, 0, 0);
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1449,7 +1603,7 @@ int32_t bridge_dsm_mr_timer(uc_engine *uc) {
     return v;
 }
 
-int32_t bridge_dsm_mr_event(uc_engine *uc, int32_t code, int32_t p0, int32_t p1) {
+int32_t bridge_dsm_mr_event(ArmRuntime *runtime, int32_t code, int32_t p0, int32_t p1) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1457,7 +1611,7 @@ int32_t bridge_dsm_mr_event(uc_engine *uc, int32_t code, int32_t p0, int32_t p1)
     dsm_event->code = code;
     dsm_event->p0 = p0;
     dsm_event->p1 = p1;
-    int32_t v = bridge_mr_event(uc, MR_EVENT, toMrpMemAddr(dsm_event), 0);
+    int32_t v = bridge_mr_event(runtime, MR_EVENT, toMrpMemAddr(dsm_event), 0);
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);
         exit(EXIT_FAILURE);
@@ -1465,12 +1619,12 @@ int32_t bridge_dsm_mr_event(uc_engine *uc, int32_t code, int32_t p0, int32_t p1)
     return v;
 }
 
-int32_t bridge_dsm_init(uc_engine *uc) {
+int32_t bridge_dsm_init(ArmRuntime *runtime) {
     if (pthread_spin_lock(&spinlock) != 0) {
         perror(SPIN_LOCK_FAIL);
         exit(EXIT_FAILURE);
     }
-    int32_t v = bridge_mr_event(uc, DSM_INIT, toMrpMemAddr(dsm_require_funcs), 0);
+    int32_t v = bridge_mr_event(runtime, DSM_INIT, toMrpMemAddr(dsm_require_funcs), 0);
 
     if (pthread_spin_unlock(&spinlock) != 0) {
         perror(SPIN_UNLOCK_FAIL);

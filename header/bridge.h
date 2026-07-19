@@ -8,11 +8,12 @@
 #include <string.h>
 
 #include "utils.h"
+#include "arm_runtime.h"
 
 typedef struct BridgeMap BridgeMap;
 
-typedef void (*BridgeCB)(struct BridgeMap *o, uc_engine *uc);
-typedef void (*BridgeInit)(struct BridgeMap *o, uc_engine *uc, uint32_t addr);
+typedef void (*BridgeCB)(struct BridgeMap *o, ArmRuntime *runtime);
+typedef void (*BridgeInit)(struct BridgeMap *o, ArmRuntime *runtime, uint32_t addr);
 
 typedef enum BridgeMapType {
     MAP_DATA,
@@ -40,15 +41,16 @@ extern int32_t editCreate(const char *title, const char *text, int32_t type, int
 extern int32 editRelease(int32 edit);
 extern char *editGetText(int32 edit);
 
-uc_err bridge_init(uc_engine *uc);
-uc_err bridge_ext_init(uc_engine *uc);
+int bridge_init(ArmRuntime *runtime);
+int bridge_ext_init(ArmRuntime *runtime);
+bool bridge_dispatch(ArmRuntime *runtime, uint32_t address);
 
-int32_t bridge_dsm_init(uc_engine *uc);
-int32_t bridge_dsm_mr_start_dsm(uc_engine *uc, char *filename, char *ext, char *entry);
-int32_t bridge_dsm_mr_pauseApp(uc_engine *uc);
-int32_t bridge_dsm_mr_resumeApp(uc_engine *uc);
-int32_t bridge_dsm_mr_timer(uc_engine *uc);
-int32_t bridge_dsm_mr_event(uc_engine *uc, int32_t code, int32_t p0, int32_t p1);
-int32_t bridge_dsm_network_cb(uc_engine *uc, uint32_t addr, int32_t p0, uint32_t p1);
+int32_t bridge_dsm_init(ArmRuntime *runtime);
+int32_t bridge_dsm_mr_start_dsm(ArmRuntime *runtime, char *filename, char *ext, char *entry);
+int32_t bridge_dsm_mr_pauseApp(ArmRuntime *runtime);
+int32_t bridge_dsm_mr_resumeApp(ArmRuntime *runtime);
+int32_t bridge_dsm_mr_timer(ArmRuntime *runtime);
+int32_t bridge_dsm_mr_event(ArmRuntime *runtime, int32_t code, int32_t p0, int32_t p1);
+int32_t bridge_dsm_network_cb(ArmRuntime *runtime, uint32_t addr, int32_t p0, uint32_t p1);
 
 #endif

@@ -1,22 +1,91 @@
 CC := aarch64-none-linux-gnu-gcc
-CFLAGS := -O3 -Wall -DNETWORK_SUPPORT -DVMRP -mcpu=cortex-a55 -mtune=cortex-a55 -flto -fno-plt -fomit-frame-pointer -I./header
+CXX := aarch64-none-linux-gnu-g++
+DEBUG ?= 0
+ENABLE_DYNARMIC ?= 0
+
+DYNARMIC_SOURCE_DIR ?= third_party/dynarmic
+DYNARMIC_BUILD_DIR ?= build/dynarmic-aarch64
+DYNARMIC_PREFIX ?= $(CURDIR)/build/dynarmic-aarch64-install
+BUILD_DIR ?= build/aarch64/$(if $(filter 1,$(DEBUG)),debug,release)/$(if $(filter 1,$(ENABLE_DYNARMIC)),dynarmic,unicorn)
+BIN_DIR ?= bin
+TARGET ?= $(BIN_DIR)/main_aarch64
+
+SYSROOT_LIB_DIR ?= /usr/lib/lib-trimui
+UNICORN_LIB_DIR ?= ./aarch64_lib
+
+COMMON_FLAGS := -O3 -Wall -DNETWORK_SUPPORT -DVMRP -march=armv8-a -mtune=generic \
+	-flto -fno-plt -fomit-frame-pointer -I./header
+CFLAGS := $(COMMON_FLAGS)
+CXXFLAGS := $(COMMON_FLAGS) -std=c++20 -idirafter
 LDFLAGS := -lpthread -lm -flto -Wl,--as-needed -Wl,-O1 -Wl,--gc-sections
-OBJS := network.o fileLib.o vmrp.o utils.o rbtree.o bridge.o memory.o cJSON.o
 
-LDFLAGS += -L/mnt/d/baiduyun/home/lib-trimui -Wl,-rpath-link=/mnt/d/baiduyun/home/lib-trimui -lSDL2 -lSDL2_mixer -L./aarch64_lib -lunicorn
+SOURCES := network.c fileLib.c vmrp.c utils.c rbtree.c bridge.c memory.c cJSON.c \
+	guest_memory.c arm_runtime.c backend_unicorn.c main.c
+OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SOURCES))
 
-ifeq ($(DEBUG),1)
-	CFLAGS += -DDEBUG
-	OBJS += debug.o trace.o
-	LDFLAGS += -lcapstone
+ifeq ($(ENABLE_DYNARMIC),1)
+CFLAGS += -DVMRP_ENABLE_DYNARMIC
+CXXFLAGS += -DVMRP_ENABLE_DYNARMIC -I$(DYNARMIC_PREFIX)/include
+OBJS += $(BUILD_DIR)/backend_dynarmic.o
+LDFLAGS += -L$(DYNARMIC_PREFIX)/lib -ldynarmic -lmcl -lfmt -lrt -latomic
+LINKER := $(CXX)
+else
+LINKER := $(CC)
 endif
 
-main_aarch64: $(OBJS) main.o
-	$(CC) $(CFLAGS) -o ./bin/$@ $^ $(LDFLAGS)
+LDFLAGS += -L$(SYSROOT_LIB_DIR) -Wl,-rpath-link=$(SYSROOT_LIB_DIR) \
+	-lSDL2 -lSDL2_mixer -L$(UNICORN_LIB_DIR) -lunicorn
 
-%.o:%.c
-	$(CC) $(CFLAGS) -c $^
+ifeq ($(DEBUG),1)
+CFLAGS += -DDEBUG
+CXXFLAGS += -DDEBUG
+OBJS += $(BUILD_DIR)/debug.o $(BUILD_DIR)/trace.o
+LDFLAGS += -lcapstone
+endif
 
-.PHONY: clean
+.PHONY: main_aarch64 dynarmic dynarmic-lib dynarmic-aarch64 dynarmic-lib-aarch64 clean
+
+main_aarch64: $(TARGET)
+	@:
+
+$(TARGET): $(OBJS) | $(BIN_DIR)
+	$(LINKER) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BIN_DIR):
+	mkdir -p $@
+
+dynarmic-aarch64: dynarmic-lib-aarch64
+	$(MAKE) -f Makefile.aarch64 ENABLE_DYNARMIC=1 main_aarch64
+
+dynarmic: dynarmic-aarch64
+	@:
+
+dynarmic-lib: dynarmic-lib-aarch64
+	@:
+
+dynarmic-lib-aarch64:
+	cmake -S $(DYNARMIC_SOURCE_DIR) -B $(DYNARMIC_BUILD_DIR) \
+		-DCMAKE_SYSTEM_NAME=Linux \
+		-DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+		-DCMAKE_C_COMPILER=$(CC) \
+		-DCMAKE_CXX_COMPILER=$(CXX) \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+		-DCMAKE_INSTALL_PREFIX=$(DYNARMIC_PREFIX) \
+		-DBUILD_TESTING=OFF \
+		-DDYNARMIC_TESTS=OFF \
+		-DDYNARMIC_FRONTENDS=A32 \
+		-DDYNARMIC_USE_LLVM=OFF \
+		-DDYNARMIC_USE_BUNDLED_EXTERNALS=ON
+	cmake --build $(DYNARMIC_BUILD_DIR) --target install -j$$(nproc)
+
 clean:
-	-rm -f *.o
+	-rm -rf build/aarch64
